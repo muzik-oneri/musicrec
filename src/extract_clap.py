@@ -34,6 +34,11 @@ class ClapEmbedder:
             inp = self.fe(x, sampling_rate=self.sr, return_tensors="pt")
             inp = {key: v.to(self.device) for key, v in inp.items()}
             feats = self.model.get_audio_features(**inp)
+            if not torch.is_tensor(feats):  # yeni transformers sürümlerinde çıktı nesnesi olabilir
+                p = getattr(feats, "pooler_output", None)
+                feats = p if p is not None else feats[0]
+            if feats.shape[-1] != self.dim:
+                raise RuntimeError(f"CLAP ses embedding boyutu {feats.shape[-1]}, {self.dim} bekleniyordu")
             feats = torch.nn.functional.normalize(feats.float(), dim=-1)
             outs.append(feats.cpu().numpy())
         return np.concatenate(outs).reshape(n, k, self.dim).mean(1).astype(np.float32)
