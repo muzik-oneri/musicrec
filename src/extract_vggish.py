@@ -11,6 +11,7 @@ import torch
 
 class VggishEmbedder:
     dim = 256
+    sr = 16000
 
     def __init__(self, device: str):
         # postprocess=False: PCA/quantize adımı yok, ham 128 boyutlu embedding
@@ -22,6 +23,17 @@ class VggishEmbedder:
             trust_repo=True,
         )
         self.model.eval()
+
+    @torch.no_grad()
+    def windows(self, windows16k: np.ndarray) -> np.ndarray:
+        """(n, örnek) -> (n, 256): her pencerenin karelerinin ortalaması ve std'si."""
+        out = []
+        for w in windows16k:
+            f = self.model.forward(w, fs=16000).cpu().numpy()  # (kare sayısı, 128)
+            if f.ndim == 1:
+                f = f[None, :]
+            out.append(np.concatenate([f.mean(0), f.std(0)]))
+        return np.stack(out).astype(np.float32)
 
     @torch.no_grad()
     def __call__(self, windows16k: np.ndarray) -> np.ndarray:

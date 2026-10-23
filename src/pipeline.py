@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""MTG-Jamendo için tar-tar embedding hattı (PANNs + VGGish, tek geçişte, TAM ŞARKI).
+"""MTG-Jamendo için tar-tar embedding hattı (TAM ŞARKI, pencere bazlı çıktı, çoklu model).
 
-Her şarkı 30 sn'lik pencerelere bölünür (şarkının tamamı örtülür, en fazla --max-windows pencere),
-şarkı vektörü pencerelerin ortalamasıdır (VGGish: tüm karelerin ortalama+std'si).
+Her şarkı 30 sn'lik pencerelere bölünür (şarkının tamamı örtülür, en fazla --max-windows pencere).
+--models ile seçilen modeller (panns, vggish, mert, clap) aynı geçişte çalışır, böylece indirme ve
+ses çözme maliyeti paylaşılır. Çıktı pencere bazlıdır (sonradan pencereler üzerinde attention gibi
+modeller eğitilebilir); ortalama alma eğitim tarafında (train.py) yapılır.
 Her tar için: indir (bir sonraki tar arka planda iner) -> doğrula -> aç -> embedding -> .npz yaz -> sesi sil.
-Disk hiç dolmaz. Çıktıda var olan tar'lar atlanır, böylece Kaggle'da oturum/süre
-dolsa bile kaldığı yerden devam edilir (--prev-dir ile önceki çıktıyı ver).
+Disk hiç dolmaz. Çıktıda var olan tar'lar atlanır, böylece Kaggle'da oturum/süre dolsa bile
+kaldığı yerden devam edilir (--prev-dir ile önceki çıktıyı ver). Sonradan yeni bir model eklemek için
+aynı --prev-dir ile yalnızca o modeli (--models mert) çalıştırman yeter.
 
 Çıktı düzeni (--out-dir):
-    panns/<tar_adı>.npz     ids (N,), emb (N, 2048)
-    vggish/<tar_adı>.npz    ids (N,), emb (N, 256)
-    splits/{train,validation,test}.tsv, vocab.json, failed.txt
+    <model>/<tar_adı>.npz   ids (N,), n_win (N,) şarkı başına pencere sayısı,
+                            emb (toplam_pencere, ...) float16:
+                            panns (W, 2048), vggish (W, 256: ortalama+std), mert (W, 13, 768), clap (W, 512)
+    splits/{train,validation,test}.tsv, vocab.json, config.json, failed.txt
 """
 import argparse
 import hashlib
@@ -30,7 +34,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from common import DATASET, SPLITS, WIN_SEC, TrackDataset, build_vocab, read_split, to_16k
+from common import DATASET, SPLITS, WIN_SEC, TrackDataset, build_vocab, read_split, resample_windows
 from extract_panns import PannsEmbedder
 from extract_vggish import VggishEmbedder
 
@@ -38,6 +42,26 @@ URLS = {
     "mtg-fast": "https://cdn.freesound.org/mtg-jamendo/{dataset}/{dtype}/{name}",
     "mtg": "https://essentia.upf.edu/documentation/datasets/mtg-jamendo/{dataset}/{dtype}/{name}",
 }
+
+
+KNOWN_MODELS = ("panns", "vggish", "mert", "clap")
+FORMAT_VERSION = 2
+
+
+def build_embedders(models, device, args) -> dict:
+    d = {}
+    for m in models:
+        if m == "panns":
+            d[m] = PannsEmbedder(device, args.panns_batch)
+        elif m == "vggish":
+            d[m] = VggishEmbedder(device)
+        elif m == "mert":
+            from extract_mert import MertEmbedder
+            d[m] = MertEmbedder(device, args.mert_batch)
+        elif m == "clap":
+            from extract_clap import ClapEmbedder
+            d[m] = ClapEmbedder(device, args.clap_batch, args.clap_name)
+    return d
 
 
 def ensure_splits(mtg_dir: Path, split_idx: int, dataset: str) -> dict:
@@ -111,9 +135,11 @@ def safe_extract(tar_path: Path, dest: Path) -> None:
         tar.extractall(dest, members=members)
 
 
-def save_npz(path: Path, ids, emb) -> None:
+def save_npz(path: Path, ids, n_win, embs) -> None:
+    """embs: şarkı başına (n_pencere, ...) dizilerinin listesi; pencere ekseninde birleştirilip float16 yazılır."""
     tmp = path.with_name(path.stem + ".tmp.npz")
-    np.savez(tmp, ids=np.asarray(ids, dtype=np.int64), emb=np.asarray(emb, dtype=np.float32))
+    np.savez(tmp, ids=np.asarray(ids, dtype=np.int64), n_win=np.asarray(n_win, dtype=np.int32),
+             emb=np.concatenate(embs).astype(np.float16))
     os.replace(tmp, path)
 
 
@@ -135,7 +161,7 @@ def restore_prev(prev_dir, out: Path) -> None:
         return
     n = 0
     for f in Path(prev_dir).rglob("*.npz"):
-        if f.parent.name in ("panns", "vggish"):
+        if f.parent.name in KNOWN_MODELS:
             dst = out / f.parent.name / f.name
             if not dst.exists():
                 shutil.copy2(f, dst)
@@ -143,7 +169,9 @@ def restore_prev(prev_dir, out: Path) -> None:
     print(f"Önceki çıktıdan {n} dosya geri yüklendi.")
 
 
-def process_audio(audio_dir: Path, rows: dict, panns, vgg, args):
+def process_audio(audio_dir: Path, rows: dict, embedders: dict, args):
+    """Döner: ids, şarkı başına pencere sayıları, feats[model] (şarkı başına (n_pencere, ...) listesi),
+    hatalı id'ler, toplam şarkı sayısı, toplam pencere sayısı."""
     items = []
     for p in sorted(audio_dir.rglob("*.mp3")):
         try:
@@ -156,24 +184,29 @@ def process_audio(audio_dir: Path, rows: dict, panns, vgg, args):
         TrackDataset(items, args.max_windows), batch_size=None, num_workers=args.num_workers,
         shuffle=False, prefetch_factor=2 if args.num_workers else None,
     )
-    ids, pe, ve, failed, nwin = [], [], [], [], 0
+    ids, nwins, failed, total_win = [], [], [], 0
+    feats = {m: [] for m in embedders}
     for tid, w32, err in tqdm(loader, desc="  embedding", leave=False):
         if err is not None:
             failed.append(tid)
             continue
         try:
             w32 = w32.numpy()
-            p_vec = panns(w32)
-            v_vec = vgg(to_16k(w32))
+            resampled, per = {}, {}
+            for m, emb in embedders.items():
+                if emb.sr not in resampled:
+                    resampled[emb.sr] = resample_windows(w32, emb.sr)
+                per[m] = emb.windows(resampled[emb.sr])
         except Exception as e:  # noqa: BLE001
             print(f"  {tid}: embedding hatası {type(e).__name__}: {e}")
             failed.append(tid)
             continue
         ids.append(tid)
-        pe.append(p_vec)
-        ve.append(v_vec)
-        nwin += len(w32)
-    return ids, pe, ve, failed, len(items), nwin
+        nwins.append(len(w32))
+        for m in embedders:
+            feats[m].append(per[m])
+        total_win += len(w32)
+    return ids, nwins, feats, failed, len(items), total_win
 
 
 def main():
@@ -189,6 +222,11 @@ def main():
     ap.add_argument("--split", type=int, default=0)
     ap.add_argument("--max-hours", type=float, default=10.5, help="süre bütçesi; dolunca temiz çıkar")
     ap.add_argument("--panns-batch", type=int, default=16, help="PANNs'a aynı anda verilen pencere sayısı")
+    ap.add_argument("--models", nargs="+", default=["panns", "vggish"], choices=list(KNOWN_MODELS),
+                    help="aynı geçişte çalışacak modeller")
+    ap.add_argument("--mert-batch", type=int, default=12, help="MERT'e aynı anda verilen 5 sn'lik parça sayısı")
+    ap.add_argument("--clap-batch", type=int, default=24, help="CLAP'a aynı anda verilen 10 sn'lik parça sayısı")
+    ap.add_argument("--clap-name", default="laion/larger_clap_music", help="HuggingFace CLAP model adı")
     ap.add_argument("--max-windows", type=int, default=20, help="şarkı başına en fazla pencere (20 = 10 dk)")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--limit-tars", type=int, default=0, help="test için ilk N tar")
@@ -198,10 +236,10 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Cihaz:", device)
     mtg, out, work = Path(args.mtg_dir), Path(args.out_dir), Path(args.work_dir) / "musicrec"
-    for m in ("panns", "vggish", "splits"):
+    for m in (*args.models, "splits"):
         (out / m).mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
-    cfg = {"win_sec": WIN_SEC, "max_windows": args.max_windows, "pooling": "mean", "vggish": "mean+std"}
+    cfg = {"format": FORMAT_VERSION, "win_sec": WIN_SEC, "max_windows": args.max_windows}
     check_config(args.prev_dir, out, cfg)
     restore_prev(args.prev_dir, out)
 
@@ -218,7 +256,7 @@ def main():
     if args.limit_tars:
         tars = tars[: args.limit_tars]
 
-    panns, vgg = PannsEmbedder(device, args.panns_batch), VggishEmbedder(device)
+    embedders = build_embedders(args.models, device, args)
     last, finished, n_ok, n_fail = 0.0, 0, 0, 0
 
     def fetch(name, sha):
@@ -229,7 +267,7 @@ def main():
         return path
 
     todo = [(n, h) for n, h in tars if not all((out / m / f"{n.removesuffix('.tar')}.npz").exists()
-                                                 for m in ("panns", "vggish"))]
+                                                 for m in args.models)]
     finished = len(tars) - len(todo)
     print(f"{finished} tar zaten hazır, {len(todo)} tar işlenecek.")
     pool = ThreadPoolExecutor(max_workers=1)
@@ -251,11 +289,12 @@ def main():
                 audio_dir.mkdir(exist_ok=True)
                 safe_extract(tar_path, audio_dir)
                 tar_path.unlink(missing_ok=True)
-                ids, pe, ve, failed, total, nwin = process_audio(audio_dir, rows, panns, vgg, args)
+                need = {m: e for m, e in embedders.items() if not (out / m / f"{stem}.npz").exists()}
+                ids, nwins, feats, failed, total, nwin = process_audio(audio_dir, rows, need, args)
                 if not ids:
                     raise RuntimeError("bu tar'dan hiç embedding çıkmadı")
-                save_npz(out / "panns" / f"{stem}.npz", ids, pe)
-                save_npz(out / "vggish" / f"{stem}.npz", ids, ve)
+                for m in need:
+                    save_npz(out / m / f"{stem}.npz", ids, nwins, feats[m])
                 if failed:
                     with open(out / "failed.txt", "a") as f:
                         f.write("\n".join(map(str, failed)) + "\n")

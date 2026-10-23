@@ -86,6 +86,19 @@ def to_16k(w32: np.ndarray) -> np.ndarray:
     return resample_poly(w32, 1, 2, axis=-1).astype(np.float32)
 
 
+def resample_windows(w32: np.ndarray, sr: int) -> np.ndarray:
+    """32 kHz pencereleri (n, örnek) hedef örnekleme hızına getirir (16, 24, 32 veya 48 kHz)."""
+    from scipy.signal import resample_poly
+
+    if sr == SR_PANNS:
+        return w32
+    ratios = {16000: (1, 2), 24000: (3, 4), 48000: (3, 2)}
+    if sr not in ratios:
+        raise ValueError(f"desteklenmeyen örnekleme hızı: {sr}")
+    up, down = ratios[sr]
+    return resample_poly(w32, up, down, axis=-1).astype(np.float32)
+
+
 def load_track(path) -> np.ndarray:
     """Şarkının tamamını 32 kHz mono olarak çözer (tek decode, tek yeniden örnekleme)."""
     import librosa
