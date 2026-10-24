@@ -200,6 +200,8 @@ def process_audio(audio_dir: Path, rows: dict, embedders: dict, args):
         except Exception as e:  # noqa: BLE001
             print(f"  {tid}: embedding hatası {type(e).__name__}: {e}")
             failed.append(tid)
+            if not ids and len(failed) >= 8:  # ilk 8 şarkının hepsi patladı: sistematik hata, hemen dur
+                raise RuntimeError(f"ilk {len(failed)} şarkının hepsi embedding hatası verdi, tar iptal: {e}") from e
             continue
         ids.append(tid)
         nwins.append(len(w32))
