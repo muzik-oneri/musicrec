@@ -41,6 +41,8 @@ from extract_vggish import VggishEmbedder
 URLS = {
     "mtg-fast": "https://cdn.freesound.org/mtg-jamendo/{dataset}/{dtype}/{name}",
     "mtg": "https://essentia.upf.edu/documentation/datasets/mtg-jamendo/{dataset}/{dtype}/{name}",
+    # freesound CDN kapalıyken: şarkılar Jamendo'dan tek tek (MTG track id = Jamendo track id, 96 kbps mp3)
+    "jamendo": "https://prod-1.storage.jamendo.com/?trackid={tid}&format=mp31",
 }
 
 
@@ -120,6 +122,45 @@ def download(url: str, dest: Path, sha: str, retries: int = 8) -> None:
             if attempt == retries:
                 raise
             time.sleep(min(30 * attempt, 180))  # sunucu 503 verirse dakikalarca bekle
+
+
+def fetch_jamendo_folder(folder: str, rows: dict, dest: Path, workers: int = 8):
+    """Tar klasörüne (ör. "00") düşen şarkıları Jamendo'dan tek tek indirir. Döner: (dest, inmeyen id'ler)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    tids = sorted(t for t, r in rows.items() if r["path"].split("/")[0] == folder)
+    if not tids:
+        raise RuntimeError(f"klasör {folder} için split'lerde şarkı yok (path biçimi beklenenden farklı?)")
+
+    def one(tid):
+        f = dest / f"{tid}.mp3"
+        if f.exists():
+            return None
+        for attempt in range(1, 4):
+            try:
+                with requests.get(URLS["jamendo"].format(tid=tid), stream=True, timeout=60) as r:
+                    if r.status_code == 404:
+                        return tid
+                    r.raise_for_status()
+                    if "audio" not in r.headers.get("content-type", ""):
+                        raise RuntimeError(f"ses değil: {r.headers.get('content-type')}")
+                    tmp = f.with_suffix(".part")
+                    with open(tmp, "wb") as fh:
+                        for chunk in r.iter_content(1 << 20):
+                            fh.write(chunk)
+                if tmp.stat().st_size < 20_000:
+                    tmp.unlink(missing_ok=True)
+                    raise RuntimeError("dosya çok küçük")
+                os.replace(tmp, f)
+                return None
+            except Exception:  # noqa: BLE001
+                time.sleep(5 * attempt)
+        return tid
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        missing = [t for t in ex.map(one, tids) if t is not None]
+    if len(missing) > 0.5 * max(len(tids), 1):
+        raise RuntimeError(f"klasör {folder}: {len(missing)}/{len(tids)} şarkı Jamendo'dan inmedi")
+    return dest, missing
 
 
 def safe_extract(tar_path: Path, dest: Path) -> None:
@@ -262,6 +303,9 @@ def main():
     last, finished, n_ok, n_fail = 0.0, 0, 0, 0
 
     def fetch(name, sha):
+        if args.source == "jamendo":
+            folder = name.removesuffix(".tar").rsplit("-", 1)[1]
+            return fetch_jamendo_folder(folder, rows, work / f"audio_{name.removesuffix('.tar')}")
         path = work / name
         if not path.exists():
             url = URLS[args.source].format(dataset=args.dataset, dtype=args.dtype, name=name)
@@ -285,12 +329,20 @@ def main():
             tar_path = work / name
             try:
                 print(f"[{finished + 1}/{len(tars)}] {name}: indirme bekleniyor...")
-                tar_path = fut.result()
+                got = fut.result()
                 if k + 1 < len(todo):
                     fut = pool.submit(fetch, *todo[k + 1])  # sonraki tar arka planda iner
-                audio_dir.mkdir(exist_ok=True)
-                safe_extract(tar_path, audio_dir)
-                tar_path.unlink(missing_ok=True)
+                if args.source == "jamendo":
+                    _, missing = got
+                    if missing:
+                        print(f"  Jamendo'da bulunamayan {len(missing)} şarkı atlandı")
+                        with open(out / "missing_jamendo.txt", "a") as f:
+                            f.write("\n".join(map(str, missing)) + "\n")
+                else:
+                    tar_path = got
+                    audio_dir.mkdir(exist_ok=True)
+                    safe_extract(tar_path, audio_dir)
+                    tar_path.unlink(missing_ok=True)
                 need = {m: e for m, e in embedders.items() if not (out / m / f"{stem}.npz").exists()}
                 ids, nwins, feats, failed, total, nwin = process_audio(audio_dir, rows, need, args)
                 if not ids:
