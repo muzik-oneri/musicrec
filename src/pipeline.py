@@ -101,7 +101,7 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def download(url: str, dest: Path, sha: str, retries: int = 3) -> None:
+def download(url: str, dest: Path, sha: str, retries: int = 8) -> None:
     tmp = dest.with_name(dest.name + ".part")
     for attempt in range(1, retries + 1):
         try:
@@ -119,7 +119,7 @@ def download(url: str, dest: Path, sha: str, retries: int = 3) -> None:
             tmp.unlink(missing_ok=True)
             if attempt == retries:
                 raise
-            time.sleep(5 * attempt)
+            time.sleep(min(30 * attempt, 180))  # sunucu 503 verirse dakikalarca bekle
 
 
 def safe_extract(tar_path: Path, dest: Path) -> None:
