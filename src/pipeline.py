@@ -205,6 +205,7 @@ def restore_prev(prev_dir, out: Path, skip=()) -> None:
         if f.parent.name in KNOWN_MODELS and f.parent.name not in skip:
             dst = out / f.parent.name / f.name
             if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, dst)
                 n += 1
     print(f"Önceki çıktıdan {n} dosya geri yüklendi.")
