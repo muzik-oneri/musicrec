@@ -197,12 +197,12 @@ def check_config(prev_dir, out: Path, cfg: dict) -> None:
     (out / "config.json").write_text(json.dumps(cfg, indent=1))
 
 
-def restore_prev(prev_dir, out: Path) -> None:
+def restore_prev(prev_dir, out: Path, skip=()) -> None:
     if not prev_dir:
         return
     n = 0
     for f in Path(prev_dir).rglob("*.npz"):
-        if f.parent.name in KNOWN_MODELS:
+        if f.parent.name in KNOWN_MODELS and f.parent.name not in skip:
             dst = out / f.parent.name / f.name
             if not dst.exists():
                 shutil.copy2(f, dst)
@@ -269,7 +269,9 @@ def main():
                     help="aynı geçişte çalışacak modeller")
     ap.add_argument("--mert-batch", type=int, default=12, help="MERT'e aynı anda verilen 5 sn'lik parça sayısı")
     ap.add_argument("--clap-batch", type=int, default=24, help="CLAP'a aynı anda verilen 10 sn'lik parça sayısı")
-    ap.add_argument("--clap-name", default="laion/larger_clap_music", help="HuggingFace CLAP model adı")
+    ap.add_argument("--clap-name", default="music_audioset_epoch_15_esc_90.14", help="resmi LAION CLAP checkpoint adı")
+    ap.add_argument("--redo", nargs="+", default=[], choices=list(KNOWN_MODELS),
+                    help="--prev-dir'den bu modelleri geri yükleme, yeniden çıkar (ör. --redo clap)")
     ap.add_argument("--max-windows", type=int, default=20, help="şarkı başına en fazla pencere (20 = 10 dk)")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--limit-tars", type=int, default=0, help="test için ilk N tar")
@@ -284,7 +286,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     cfg = {"format": FORMAT_VERSION, "win_sec": WIN_SEC, "max_windows": args.max_windows}
     check_config(args.prev_dir, out, cfg)
-    restore_prev(args.prev_dir, out)
+    restore_prev(args.prev_dir, out, set(args.redo))
 
     files = ensure_splits(mtg, args.split, args.dataset)
     rows_by_split = {s: read_split(p) for s, p in files.items()}
