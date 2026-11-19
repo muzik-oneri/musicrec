@@ -263,7 +263,7 @@ def mel_section(rep: Report, mel_dir: Path, rows, order):
 
     tags = [t for t in order[:6] if counts[t]]
     if tags:
-        fig, ax = plt.subplots(figsize=(9, 3.6))
+        fig, ax = plt.subplots(figsize=(9, 4), layout="constrained")
         allmean = sum(sums.values()) / sum(counts.values())
         for k, t in enumerate(tags):
             ax.plot(sums[t] / counts[t] - allmean, color=SERIES[k], linewidth=2, label=t)
@@ -271,7 +271,7 @@ def mel_section(rep: Report, mel_dir: Path, rows, order):
         ax.set_xlabel("mel bandı (düşük → yüksek frekans)")
         ax.set_ylabel("dB fark")
         ax.set_title("Etiket başına ortalama spektrum (genel ortalamadan fark)")
-        ax.legend(ncols=3, loc="upper right")
+        fig.legend(*ax.get_legend_handles_labels(), loc="outside lower center", ncols=len(tags))
         rep.fig(fig, "mel_mean_spectrum", "Etiketin şarkılarının hangi frekans bölgelerinde ortalamadan güçlü/zayıf "
                                           "olduğu (en sık 6 etiket).")
 
@@ -348,13 +348,14 @@ def results_section(rep: Report, run_specs):
         for i, m in enumerate(names):
             ax.errorbar(mean[i], i, xerr=sd[i], fmt="o", ms=8, color=color[m], mec=SURFACE, mew=1.5,
                         ecolor=INK2, elinewidth=1, capsize=3, zorder=3)
-        lo = min(mean - sd)
-        hi = max(mean + sd)
-        pad = (hi - lo) * 0.35 + 1e-3
+        # eksen rastgele tahmin seviyesinden (F1 için 0) başlar: dar bir aralığa zoom yapılırsa 0.003'lük
+        # fark büyük görünür. Farkların büyüklüğü bu yüzden "rastgeleye göre kazanç" ölçeğinde okunur.
         ref = {"pr_auc": base_pr, "p_at_5": base_pk, "p_at_10": base_pk, "roc_auc": 0.5}.get(k)
-        left = max(0, lo - pad) if ref is None or ref < lo - pad else ref - pad * 0.3
-        ax.set_xlim(left, hi + pad)
-        if ref is not None and ref >= left:
+        hi = max(mean + sd)
+        left = ref if ref is not None else 0.0
+        span = hi - left
+        ax.set_xlim(left - span * 0.04, hi + span * 0.12)
+        if ref is not None:
             ax.axvline(ref, color=MUTED, linestyle="--", linewidth=1)
         for i, v in enumerate(mean):
             ax.annotate(f"{v:.3f}", (v, i), xytext=(0, 9), textcoords="offset points", ha="center",
@@ -363,8 +364,9 @@ def results_section(rep: Report, run_specs):
         ax.set_title(lbl)
         ax.grid(axis="y", visible=False)
     axes[0].set_yticks(y, names)
-    rep.fig(fig, "results_model_comparison", "Her panel kendi ölçeğinde; hata çubukları seed'ler arası std. "
-                                             "Kesik çizgi rastgele tahmin seviyesi.")
+    rep.fig(fig, "results_model_comparison", "Her panel kendi ölçeğinde ve rastgele tahmin seviyesinden "
+                                             "(kesik çizgi; F1 için 0) başlar. Hata çubukları seed'ler arası std. "
+                                             "Kesin değerler için tabloya bakın.")
 
     # seed dağılımı (PR-AUC)
     if any(len(models[m]["runs"]) > 1 for m in names):
@@ -431,7 +433,7 @@ def per_tag_section(rep: Report, models, names, color):
     rep.fig(fig, "results_per_tag_roc_auc", "0.5 = şans. Sıralama en iyi modele göre.")
 
     # PR-AUC'nin etiket oranıyla ilişkisi (lift)
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    fig, ax = plt.subplots(figsize=(7, 5), layout="constrained")
     for m in shown:
         d = pt[m]
         ax.scatter(d["prevalence"], d["pr_auc"], s=26, color=color[m], label=m, edgecolor=SURFACE, linewidth=1,
@@ -439,13 +441,21 @@ def per_tag_section(rep: Report, models, names, color):
     lim = [0, max(d["prevalence"].max() for d in pt.values()) * 1.05]
     ax.plot(lim, lim, color=MUTED, linestyle="--", linewidth=1)
     ax.text(lim[1], lim[1], "rastgele ", color=MUTED, ha="right", va="bottom", fontsize=7.5)
-    for _, r in pt[best].nlargest(5, "pr_auc").iterrows():
-        ax.annotate(r["tag"], (r["prevalence"], r["pr_auc"]), xytext=(4, 2), textcoords="offset points",
-                    fontsize=7.5, color=INK2)
+    # birbirine yakın noktaların etiketleri çakışmasın: piksel uzayında yakınsa sola veya alta kaydır
+    fig.canvas.draw()
+    placed = []
+    for _, r in pt[best].nlargest(6, "pr_auc").iterrows():
+        px, py = ax.transData.transform((r["prevalence"], r["pr_auc"]))
+        for dx, dy, ha in ((5, 3, "left"), (-5, 3, "right"), (5, -10, "left"), (-5, -10, "right")):
+            if all(abs(px + dx - qx) > 55 or abs(py + dy - qy) > 11 for qx, qy in placed):
+                break
+        placed.append((px + dx, py + dy))
+        ax.annotate(r["tag"], (r["prevalence"], r["pr_auc"]), xytext=(dx, dy), textcoords="offset points",
+                    fontsize=7.5, color=INK2, ha=ha)
     ax.set_xlabel("etiket oranı (test)")
     ax.set_ylabel("PR-AUC")
     ax.set_title("Sık etiketler daha mı kolay?")
-    ax.legend(loc="upper left")
+    fig.legend(*ax.get_legend_handles_labels(), loc="outside lower center", ncols=min(4, len(shown)))
     rep.fig(fig, "results_pr_vs_prevalence", "Kesik çizginin üstündeki her nokta rastgeleden iyi; uzaklık kazancı "
                                              "gösterir.")
 
