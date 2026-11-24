@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Sıfırdan (önceden eğitilmemiş) CNN ile MTG-Jamendo mood/theme çok etiketli sınıflandırma.
 
-Mimari --arch ile seçilir: small (~1.2 M, 4 blok), resnet18 veya resnet34 (bkz. resnet.py).
+Mimari --arch ile seçilir: small (~1.2 M, 4 blok), resnet18 veya resnet34 (bkz. resnet.py),
+crnn (~2.9 M, konvolüsyon + çift yönlü GRU, bkz. crnn.py).
 ResNet'ler için önerilen ek düzenlileştirme: --ema (ağırlık EMA'sı), --drop-path, --mixup, --gain-db.
 
 Giriş: pipeline.py --models mel çıktısı (pencere başına 64 x 938 log-mel, float16).
@@ -30,6 +31,7 @@ import torch.nn.functional as F
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 
 from common import SPLITS, read_split, set_seed
+from crnn import CRNN
 from resnet import EMA, AudioResNet
 from train import best_thresholds, macro_metrics, resolve_emb_dir, retrieval_eval, summarize, valid_mask
 
@@ -119,13 +121,16 @@ class SmallCNN(nn.Module):
         return (out, e) if return_emb else out
 
 
-MODEL_NAME = {"small": "cnn", "resnet18": "resnet18", "resnet34": "resnet34"}
+MODEL_NAME = {"small": "cnn", "resnet18": "resnet18", "resnet34": "resnet34", "crnn": "crnn"}
 
 
 def build_model(cfg, n_tags):
     """cfg: arch, width, dropout, drop_path, n_mels (model.pt içine de bu sözlük yazılır)."""
     if cfg["arch"] == "small":
         return SmallCNN(n_tags, cfg["width"], cfg["dropout"])
+    if cfg["arch"] == "crnn":
+        return CRNN(n_tags, cfg["n_mels"], cfg["width"], cfg.get("rnn_hidden", 128), cfg.get("rnn_layers", 2),
+                    cfg["dropout"])
     return AudioResNet(n_tags, cfg["arch"], cfg["n_mels"], cfg["width"], cfg["drop_path"], cfg["dropout"])
 
 
@@ -184,7 +189,7 @@ def train_one(prep, args, device, seed, save_dir):
     tr, va, te = data["train"], data["validation"], data["test"]
     name = MODEL_NAME[args.arch]
     cfg = {"arch": args.arch, "width": args.width, "dropout": args.dropout, "drop_path": args.drop_path,
-           "n_mels": int(tr["x"].shape[1])}
+           "n_mels": int(tr["x"].shape[1]), "rnn_hidden": args.rnn_hidden, "rnn_layers": args.rnn_layers}
     net = build_model(cfg, len(vocab)).to(device)
     if device == "cuda":
         net = net.to(memory_format=torch.channels_last)
@@ -309,7 +314,7 @@ def main():
     ap.add_argument("--emb-dir", required=True, help="pipeline.py --models mel çıktısı (splits/, vocab.json, mel/)")
     ap.add_argument("--out-dir", default="runs_cnn")
     ap.add_argument("--arch", choices=list(MODEL_NAME), default="small",
-                    help="small (küçük CNN), resnet18, resnet34")
+                    help="small (küçük CNN), resnet18, resnet34, crnn")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--batch-size", type=int, default=64)
@@ -323,6 +328,8 @@ def main():
     ap.add_argument("--time-mask", type=int, default=40)
     ap.add_argument("--mixup", type=float, default=0.0, help="mixup beta parametresi (0 = kapalı)")
     ap.add_argument("--drop-path", type=float, default=0.1, help="resnet: stochastic depth oranı (son blok)")
+    ap.add_argument("--rnn-hidden", type=int, default=128, help="crnn: GRU gizli boyutu (yön başına)")
+    ap.add_argument("--rnn-layers", type=int, default=2, help="crnn: GRU katman sayısı")
     ap.add_argument("--ema", type=float, default=0.0, help="ağırlık EMA katsayısı, ör. 0.999 (0 = kapalı)")
     ap.add_argument("--gain-db", type=float, default=0.0, help="eğitimde ±dB rastgele kazanç (0 = kapalı)")
     ap.add_argument("--clip", type=float, default=0.0, help="gradyan normu kırpma (0 = kapalı)")

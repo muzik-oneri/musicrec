@@ -10,7 +10,12 @@ src/extract_panns.py   PANNs Cnn14 -> 2048 boyut (pencere ortalaması)
 src/extract_vggish.py  VGGish -> 256 boyut (tüm karelerin ortalaması + std)
 src/pipeline.py        tar-tar indir, embedding çıkar, .npz yaz, sesi sil (devam edebilir)
 src/train.py           MLP eğitimi, çok seed, macro ROC-AUC / PR-AUC / F1, ortalama ± std
-kaggle/                Kaggle notebook'ları (embedding çıkarımı, eğitim)
+src/extract_mel.py     log-mel çıkarımı (sıfırdan modeller için giriş)
+src/train_cnn.py       log-mel üzerinde sıfırdan eğitim: --arch small | resnet18 | resnet34 | crnn
+src/resnet.py          ses için uyarlanmış ResNet-18/34, ağırlık EMA'sı
+src/crnn.py            CRNN: konvolüsyon blokları + çift yönlü GRU
+src/visualize.py       veri ve sonuç grafikleri, tek dosyalık HTML rapor
+kaggle/                Kaggle notebook'ları (embedding çıkarımı, eğitim; models_5seed_notebook: ResNet-34 / CRNN / küçük CNN, 5 seed)
 ```
 
 ## Kaggle'da çalıştırma
